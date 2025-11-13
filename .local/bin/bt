@@ -1,0 +1,545 @@
+#!/usr/bin/env zsh
+# bt - Bluetooth device management utility v2.0
+# Uses _bluetooth v2.0 extension library
+
+# Exit on errors
+set -e
+
+# Get script name
+readonly SCRIPT_NAME="$(basename "$0")"
+
+# ------------------------------------------------------------------------------
+# Dependencies
+# ------------------------------------------------------------------------------
+
+# Load Bluetooth library
+if ! source "$(command -v _bluetooth)" 2>/dev/null; then
+    echo "ERROR: _bluetooth extension library not found" >&2
+    echo "Please ensure /home/andronics/.dotfiles/lib is in PATH" >&2
+    exit 1
+fi
+
+# _bluetooth already loads: _common, _xdg, _log (and optionally _rofi, _lifecycle, _events, etc.)
+
+# Load rofi for interactive selection (optional)
+source "$(command -v _rofi)" 2>/dev/null || true
+
+# ------------------------------------------------------------------------------
+# Main Dispatcher
+# ------------------------------------------------------------------------------
+
+bt_main() {
+    # Service mode: no arguments starts monitoring/scanning
+    if [[ $# -eq 0 ]]; then
+        bt_service_mode
+        return $?
+    fi
+
+    local command="$1"
+    shift 2>/dev/null || true
+
+    # Dispatch to appropriate library function
+    case "${command}" in
+        # Controller management
+        controller-list)
+            bluetooth-controller-list "$@"
+            ;;
+        controller-default)
+            bluetooth-controller-show "$@"
+            ;;
+        controller-select)
+            bluetooth-controller-select "$@"
+            ;;
+
+        # Device operations - connect/disconnect
+        device-connect|connect)
+            bluetooth-connect "$@"
+            ;;
+        device-disconnect|disconnect)
+            bluetooth-disconnect "$@"
+            ;;
+        device-toggle|toggle)
+            bluetooth-connect-toggle "$@"
+            ;;
+
+        # Device operations - pairing
+        device-pair|pair)
+            bluetooth-pair "$@"
+            ;;
+        device-unpair|unpair|remove)
+            bluetooth-unpair "$@"
+            ;;
+        device-trust|trust)
+            bluetooth-trust "$@"
+            ;;
+        device-untrust|untrust)
+            bluetooth-untrust "$@"
+            ;;
+        device-block|block)
+            bluetooth-block "$@"
+            ;;
+        device-unblock|unblock)
+            bluetooth-unblock "$@"
+            ;;
+
+        # Device listing and info
+        device-list|list|devices)
+            bluetooth-devices-list "$@"
+            ;;
+        device-paired|paired)
+            bluetooth-devices-paired "$@"
+            ;;
+        device-connected|connected)
+            bluetooth-devices-list "connected"
+            ;;
+        device-info|info)
+            bluetooth-device-info "$@"
+            ;;
+
+        # Discovery control
+        discover-enable|discoverable-on)
+            bluetooth-discoverable-on "$@"
+            ;;
+        discover-disable|discoverable-off)
+            bluetooth-discoverable-off "$@"
+            ;;
+        discover-state|discoverable-state)
+            bluetooth-discoverable-status "$@"
+            ;;
+        discover-toggle|discoverable-toggle)
+            if bluetooth-discoverable-status >/dev/null 2>&1; then
+                bluetooth-discoverable-off
+            else
+                bluetooth-discoverable-on
+            fi
+            ;;
+
+        # Pairing mode control
+        pairing-enable|pairable-on)
+            bluetooth-pairable-on "$@"
+            ;;
+        pairing-disable|pairable-off)
+            bluetooth-pairable-off "$@"
+            ;;
+        pairing-state|pairable-state)
+            bluetooth-pairable-status "$@"
+            ;;
+        pairing-toggle|pairable-toggle)
+            if bluetooth-pairable-status >/dev/null 2>&1; then
+                bluetooth-pairable-off
+            else
+                bluetooth-pairable-on
+            fi
+            ;;
+
+        # Power control
+        power-enable|on)
+            bluetooth-power-on "$@"
+            ;;
+        power-disable|off)
+            bluetooth-power-off "$@"
+            ;;
+        power-state|status)
+            bluetooth-power-status "$@"
+            ;;
+        power-toggle)
+            bluetooth-power-toggle "$@"
+            ;;
+
+        # Scanning
+        scan-enable|scan)
+            bt_scan_interactive "$@"
+            ;;
+        scan-disable|scan-stop)
+            bluetooth-scan-stop "$@"
+            ;;
+        scan-state)
+            # Check if scanning is active
+            local show_output
+            show_output=$(bluetooth-controller-show)
+            if [[ "$show_output" =~ "Discovering: yes" ]]; then
+                echo "yes"
+            else
+                echo "no"
+            fi
+            ;;
+        scan-toggle)
+            local show_output
+            show_output=$(bluetooth-controller-show)
+            if [[ "$show_output" =~ "Discovering: yes" ]]; then
+                bluetooth-scan-stop
+            else
+                bluetooth-scan-start
+            fi
+            ;;
+
+        # Enhanced features (v2.0)
+        select)
+            bt_select_device "$@"
+            ;;
+        audio)
+            bt_audio_profile "$@"
+            ;;
+        battery)
+            bluetooth-device-battery "$@"
+            ;;
+        rssi|signal)
+            bluetooth-device-rssi "$@"
+            ;;
+        alias)
+            bluetooth-device-alias "$@"
+            ;;
+        connect-all)
+            bluetooth-connect-all "$@"
+            ;;
+        disconnect-all)
+            bluetooth-disconnect-all "$@"
+            ;;
+
+        # Help and info
+        help|--help|-h)
+            bt_usage
+            ;;
+        version|--version|-v)
+            echo "bt CLI v2.0.0 (using _bluetooth library v${BLUETOOTH_VERSION:-2.0.0})"
+            ;;
+        bt-info)
+            bluetooth-info "$@"
+            ;;
+
+        # Unknown command
+        *)
+            echo "ERROR: Unknown command '${command}'" >&2
+            echo "Run 'bt help' for usage information" >&2
+            return 1
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------
+# Service Mode (no arguments - interactive scan)
+# ------------------------------------------------------------------------------
+
+bt_service_mode() {
+    log-info "Running in service mode - performing device scan"
+
+    # Power on Bluetooth
+    bluetooth-power-on
+
+    # Start scan
+    log-info "Scanning for Bluetooth devices for ${BLUETOOTH_SCAN_DURATION:-10} seconds..."
+    bluetooth-scan-start
+
+    # Show countdown
+    local duration="${BLUETOOTH_SCAN_DURATION:-10}"
+    for ((i=duration; i>0; i--)); do
+        printf "\r--- Remaining: %2d seconds" "$i"
+        sleep 1
+    done
+    printf "\r--- Scan complete. Processing...   \n"
+
+    # Stop scan
+    bluetooth-scan-stop
+    sleep 1
+
+    # Display discovered devices
+    log-info "Discovered devices:"
+    local devices
+    devices=$(bluetooth-devices-list)
+
+    if [[ -n "$devices" ]]; then
+        echo "$devices" | grep -o 'Device \([0-9A-Fa-f]\{2\}:\)\{5\}[0-9A-Fa-f]\{2\} .*' | while read -r line; do
+            local mac=$(echo "$line" | grep -oE '([0-9A-F]{2}:){5}[0-9A-F]{2}')
+            local name=$(echo "$line" | sed 's/Device [0-9A-F:]\+ //')
+            [ -z "$name" ] && name="Unknown"
+            log-info "  - $name ($mac)"
+        done
+    else
+        log-warn "No devices found"
+    fi
+
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# Interactive Device Selection (rofi)
+# ------------------------------------------------------------------------------
+
+bt_select_device() {
+    if ! command -v rofi >/dev/null 2>&1; then
+        log-error "rofi not installed - interactive selection unavailable"
+        log-info "Install rofi or specify device MAC address directly"
+        return 1
+    fi
+
+    log-info "Loading device list..."
+
+    # Get list of devices
+    local devices
+    devices=$(bluetooth-devices-list)
+
+    if [[ -z "$devices" ]]; then
+        log-error "No devices found - run 'bt scan' first"
+        return 1
+    fi
+
+    # Format for rofi: "Name (MAC) [Status]"
+    local device_list=""
+    while IFS= read -r line; do
+        if [[ "$line" =~ Device\ ([0-9A-F:]+)\ (.*) ]]; then
+            local mac="${match[1]}"
+            local name="${match[2]}"
+            [[ -z "$name" ]] && name="Unknown Device"
+
+            # Get connection status
+            local status="disconnected"
+            if bluetooth-connect-status "$mac" >/dev/null 2>&1; then
+                status="connected"
+            fi
+
+            device_list+="${name} (${mac}) [${status}]\n"
+        fi
+    done <<< "$devices"
+
+    # Show rofi menu
+    local selected
+    selected=$(echo -e "$device_list" | rofi -dmenu -i -p "Bluetooth Device" -format "s")
+
+    if [[ -z "$selected" ]]; then
+        log-info "Selection cancelled"
+        return 0
+    fi
+
+    # Extract MAC address from selection
+    local mac=$(echo "$selected" | grep -oE '([0-9A-F]{2}:){5}[0-9A-F]{2}')
+
+    if [[ -z "$mac" ]]; then
+        log-error "Failed to extract MAC address from selection"
+        return 1
+    fi
+
+    # Check if connected, toggle
+    log-info "Toggling connection for device" "mac=$mac"
+    bluetooth-connect-toggle "$mac"
+}
+
+# ------------------------------------------------------------------------------
+# Interactive Scan
+# ------------------------------------------------------------------------------
+
+bt_scan_interactive() {
+    local duration="${1:-${BLUETOOTH_SCAN_DURATION:-10}}"
+
+    log-info "Starting Bluetooth scan" "duration=${duration}s"
+
+    # Power on if needed
+    if ! bluetooth-power-status >/dev/null 2>&1; then
+        log-info "Powering on Bluetooth"
+        bluetooth-power-on
+        sleep 1
+    fi
+
+    # Start scan
+    bluetooth-scan-start "$duration"
+
+    # Show countdown
+    for ((i=duration; i>0; i--)); do
+        printf "\r--- Scanning: %2d seconds remaining" "$i"
+        sleep 1
+    done
+    printf "\r--- Scan complete.                    \n"
+
+    # Display results
+    log-info "Discovered devices:"
+    local devices
+    devices=$(bluetooth-devices-list)
+
+    if [[ -n "$devices" ]]; then
+        echo "$devices"
+    else
+        log-warn "No devices found"
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Audio Profile Management
+# ------------------------------------------------------------------------------
+
+bt_audio_profile() {
+    local mac="$1"
+    local profile="${2:-}"
+
+    if [[ -z "$mac" ]]; then
+        log-error "MAC address required"
+        echo "Usage: bt audio <MAC> [profile]" >&2
+        echo "       bt audio <MAC>           - Show current audio profile" >&2
+        echo "       bt audio <MAC> a2dp|hsp|hfp - Set audio profile" >&2
+        return 1
+    fi
+
+    if ! bluetooth-validate-mac "$mac"; then
+        log-error "Invalid MAC address" "mac=$mac"
+        return 1
+    fi
+
+    if [[ -z "$profile" ]]; then
+        # Show current profile
+        log-info "Current audio profile for device" "mac=$mac"
+        bluetooth-audio-profile "$mac"
+    else
+        # Set profile
+        log-info "Setting audio profile" "mac=$mac" "profile=$profile"
+        bluetooth-audio-profile-set "$mac" "$profile"
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Usage Information
+# ------------------------------------------------------------------------------
+
+bt_usage() {
+    cat <<'EOF'
+bt - Bluetooth Device Management v2.0
+
+USAGE:
+    bt                                   Run in service mode (scan and list devices)
+    bt <command> [arguments]             Execute specific command
+
+CONTROLLER COMMANDS:
+    controller-list                      List all Bluetooth controllers
+    controller-default                   Show default controller details
+    controller-select <MAC>              Select active controller
+
+DEVICE COMMANDS:
+    Connect/Disconnect:
+        connect <MAC>                    Connect to device
+        disconnect <MAC>                 Disconnect from device
+        toggle <MAC>                     Toggle connection state
+        connect-all                      Connect all trusted devices
+        disconnect-all                   Disconnect all devices
+
+    Pairing:
+        pair <MAC>                       Pair with device
+        unpair <MAC>                     Unpair/remove device
+        trust <MAC>                      Mark device as trusted
+        untrust <MAC>                    Remove trust from device
+        block <MAC>                      Block device
+        unblock <MAC>                    Unblock device
+
+    Listing & Info:
+        list [filter]                    List devices (all/paired/connected)
+        paired                           List only paired devices
+        connected                        List only connected devices
+        info <MAC>                       Show detailed device information
+
+POWER COMMANDS:
+    on                                   Turn Bluetooth power on
+    off                                  Turn Bluetooth power off
+    status                               Show power status
+    power-toggle                         Toggle power state
+
+DISCOVERY COMMANDS:
+    discoverable-on [timeout]            Make adapter discoverable
+    discoverable-off                     Disable discoverable mode
+    discoverable-state                   Show discoverable status
+    discoverable-toggle                  Toggle discoverable mode
+
+PAIRING MODE COMMANDS:
+    pairable-on [timeout]                Allow device pairing
+    pairable-off                         Disable pairing mode
+    pairable-state                       Show pairable status
+    pairable-toggle                      Toggle pairable mode
+
+SCANNING COMMANDS:
+    scan [duration]                      Scan for devices (default: 10s)
+    scan-stop                            Stop active scan
+    scan-state                           Check if scanning
+    scan-toggle                          Toggle scanning
+
+ENHANCED FEATURES (v2.0):
+    select                               Interactive device selection (rofi)
+    audio <MAC> [profile]                Get/set audio profile (a2dp/hsp/hfp)
+    battery <MAC>                        Show device battery level
+    rssi <MAC>                           Show signal strength (RSSI)
+    alias <MAC> [name]                   Get/set device alias
+
+UTILITY COMMANDS:
+    help, --help, -h                     Show this help message
+    version, --version, -v               Show version information
+    bt-info                              Show Bluetooth system status
+
+EXAMPLES:
+    # Service mode (scan and list)
+    bt
+
+    # Scan for devices
+    bt scan 15
+
+    # Connect to device
+    bt connect 94:DB:56:F5:8F:9E
+
+    # Interactive device selection
+    bt select
+
+    # Pair with new device
+    bt pair 00:11:22:33:44:55
+    bt trust 00:11:22:33:44:55
+
+    # List paired devices
+    bt paired
+
+    # Check device battery
+    bt battery 94:DB:56:F5:8F:9E
+
+    # Switch audio profile
+    bt audio 94:DB:56:F5:8F:9E a2dp
+
+    # Power management
+    bt on
+    bt status
+    bt off
+
+    # Make discoverable for pairing
+    bt discoverable-on 180
+
+    # Connect all trusted devices
+    bt connect-all
+
+CONFIGURATION:
+    XDG directories used:
+    - ${XDG_CACHE_HOME}/bluetooth/       - Cache directory
+    - ${XDG_CONFIG_HOME}/bluetooth/      - Configuration
+    - ${XDG_STATE_HOME}/bluetooth/       - Runtime state
+
+    Environment variables:
+    - BLUETOOTH_DEBUG=true               - Enable debug logging
+    - BLUETOOTH_SCAN_DURATION=10         - Default scan duration
+    - BLUETOOTH_CONNECT_TIMEOUT=15       - Connection timeout
+    - BLUETOOTH_PAIR_TIMEOUT=30          - Pairing timeout
+
+NOTES:
+    - Requires bluetoothctl command (bluez package)
+    - Interactive selection requires rofi
+    - Audio profile switching may require PulseAudio
+    - Some features require device support (battery, RSSI)
+
+BACKWARD COMPATIBILITY:
+    All original commands preserved:
+    - power-enable, power-disable, power-state, power-toggle
+    - scan-enable, scan-disable, scan-state, scan-toggle
+    - discover-enable, discover-disable, discover-state, discover-toggle
+    - pairing-enable, pairing-disable, pairing-state, pairing-toggle
+    - device-connect, device-disconnect, device-pair, device-unpair, etc.
+
+DOCUMENTATION:
+    Full library documentation: ~/.dotfiles/lib/.local/docs/lib/_bluetooth.md
+    Utility documentation: ~/.dotfiles/bt/README.md
+
+EOF
+}
+
+# ------------------------------------------------------------------------------
+# Execute
+# ------------------------------------------------------------------------------
+
+bt_main "$@"
